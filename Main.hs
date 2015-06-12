@@ -19,12 +19,8 @@ setupNewUser username = do
                                     , username
                                     , "\"]"]
   r <- augMatch userQuery
-  a <- augMatch "/files/etc/ssh/sshd_config/AllowUsers/*"
-  liftIO $ print a
   case r of
     AugeasResult mu -> do
-      liftIO $ print mu
-      liftIO $ print (null $ fromMaybe [] mu)
       when (null $ fromMaybe [] mu)
         (void $ augSet "/files/etc/ssh/sshd_config/AllowUsers/01" username)
       void augSave

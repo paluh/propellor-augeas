@@ -19,5 +19,8 @@ library
   build-depends:         augeas
                        , base >=4.8 && <4.9
                        , bytestring
+                       , directory
+                       , filepath
+                       , monads-tf
                        , propellor
   hs-source-dirs:      src
