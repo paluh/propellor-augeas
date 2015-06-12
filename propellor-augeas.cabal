@@ -20,7 +20,8 @@ library
                        , base >=4.8 && <4.9
                        , bytestring
                        , directory
+                       , either
                        , filepath
-                       , monads-tf
+                       , transformers
                        , propellor
   hs-source-dirs:      src
