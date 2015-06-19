@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Propellor.Property.Augeas where
@@ -10,6 +11,8 @@ import           Data.ByteString (ByteString, empty)
 import qualified Data.ByteString.Char8 as Char8
 import           Data.Maybe (catMaybes, fromMaybe)
 import           Foreign (Ptr, withForeignPtr)
+import           Propellor.Types (Propellor(..))
+import           Propellor.Types.Result (Result(..), ToResult(..))
 import           System.Augeas (aug_init, aug_match, aug_save, aug_set, AugRet(..), AugFlag,
                                 save_newfile, enable_span, aug_get, AugMatch(..))
 import qualified System.Augeas as A
@@ -105,3 +108,18 @@ runAugeas augConf actions = do
   case mr of
     Nothing -> return . Left $ AugeasInitializationFailed
     Just r -> return r
+
+
+-- propellor integration
+
+instance ToResult (AugeasResult a) where
+  toResult (Left _) = FailedChange
+  toResult (Right (_, modified)) =
+    if null modified
+      then MadeChange
+      else NoChange
+
+augeasAction :: AugeasConfig -> Augeas a -> Propellor Result
+augeasAction cfg as = do
+  augResult <- liftIO $ runAugeas cfg as
+  return . toResult $ augResult
