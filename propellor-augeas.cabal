@@ -16,12 +16,14 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Propellor.Property.Augeas
+                       Propellor.Property.Collectd
   build-depends:         augeas
                        , base >=4.8 && <4.9
                        , bytestring
                        , directory
                        , either
                        , filepath
+                       , optional-args
                        , transformers
                        , propellor
   hs-source-dirs:      src

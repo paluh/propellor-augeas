@@ -4,15 +4,16 @@
 module Propellor.Property.Augeas where
 
 import           Control.Monad (forM, sequence)
+import           Control.Monad.Trans.Class (lift)
 import           Control.Monad.Trans.Either (EitherT, left, runEitherT)
 import           Control.Monad.Trans.State.Strict (evalStateT, get, gets, put, modify, StateT(..), runStateT, state)
 import           Control.Monad.IO.Class (liftIO)
 import           Data.ByteString (ByteString, empty)
 import qualified Data.ByteString.Char8 as Char8
 import           Data.Maybe (catMaybes, fromMaybe)
-import           Foreign (Ptr, withForeignPtr)
+import           Foreign (Ptr, nullPtr, withForeignPtr)
 import           Propellor.Types (Propellor(..))
-import           Propellor.Types.Result (Result(..), ToResult(..))
+import           Propellor.Types.Result (Result(..))
 import           System.Augeas (aug_init, aug_match, aug_save, aug_set, AugRet(..), AugFlag,
                                 save_newfile, enable_span, aug_get, AugMatch(..))
 import qualified System.Augeas as A
@@ -45,23 +46,28 @@ data AugeasSession =
     , modifiedFiles :: [String]
     }
 
-type Augeas a = StateT AugeasSession (EitherT AugeasFailure IO) a
+type Augeas a = EitherT AugeasFailure (StateT AugeasSession IO) a
+
+gets' :: (AugeasSession -> c) -> Augeas c
+gets' = lift . gets
+put' :: AugeasSession -> Augeas ()
+put' = lift . put
 
 commandError :: Augeas a
 commandError = do
-  aPtr <- gets augPtr
+  aPtr <- gets' augPtr
   e <- fromMaybe [] <$> augMatch "/augeas//errors/*"
-  m <- gets modifiedFiles
-  StateT (\_ -> left (AugeasCommandError m e))
+  m <- lift . gets $ modifiedFiles
+  left (AugeasCommandError m e)
 
 augSet :: Path -> Value -> Augeas AugRet
 augSet p v = do
-  aPtr <- gets augPtr
+  aPtr <- gets' augPtr
   liftIO $ aug_set aPtr p v
 
 augGet :: Path -> Augeas (Maybe String)
 augGet p = do
-  aPtr <- gets augPtr
+  aPtr <- gets' augPtr
   m <- liftIO $ aug_get aPtr p
   case m of
     Left _  -> commandError
@@ -69,7 +75,7 @@ augGet p = do
 
 augMatch :: Path -> Augeas (Maybe [(String, Maybe String)])
 augMatch p = do
-  aPtr <- gets augPtr
+  aPtr <- gets' augPtr
   (r, m) <- liftIO $ aug_match aPtr p
   case m of
     Just paths -> Just <$> sequence [(,) p <$> augGet (Char8.pack p) | p <- paths]
@@ -77,14 +83,14 @@ augMatch p = do
 
 augSave :: Augeas ()
 augSave = do
-  aPtr <- gets augPtr
+  aPtr <- gets' augPtr
   r <- liftIO $ aug_save aPtr
   if r == A.error
     then commandError
     else do
       mf <- fromMaybe [] <$> augMatch "/augeas/events/saved"
       let mf' = [v | (_, Just v) <- mf]
-      modify (\s -> s{modifiedFiles = mf' ++ modifiedFiles s})
+      lift . modify $ (\s -> s{modifiedFiles = mf' ++ modifiedFiles s})
       return ()
 
 withAugeasPtr :: AugeasConfig -> (Ptr A.Augeas -> IO a) -> IO (Maybe a)
@@ -95,31 +101,30 @@ withAugeasPtr c f = do
     Nothing -> return Nothing
 
 
-type AugeasResult a = Either AugeasFailure (a, ModifiedFiles)
+type AugeasResult a = Either AugeasFailure a
 
-runAugeas :: AugeasConfig -> Augeas a -> IO (AugeasResult a)
+-- return augeas session with augeas pointer cleared up
+runAugeas :: AugeasConfig -> Augeas a -> IO (AugeasResult a, AugeasSession)
 runAugeas augConf actions = do
-  let actions' = do {
-    a <- actions;
-    mf <- gets modifiedFiles;
-    return (a, mf);
-  }
-  mr <- withAugeasPtr augConf (\p -> runEitherT $ evalStateT actions' (AugeasSession p []))
+  mr <- withAugeasPtr augConf (\p -> runStateT (runEitherT actions) (AugeasSession p []))
   case mr of
-    Nothing -> return . Left $ AugeasInitializationFailed
-    Just r -> return r
+     Nothing -> return (Left AugeasInitializationFailed, AugeasSession {augPtr = nullPtr, modifiedFiles = []})
+     Just (r, s) -> return (r, s{ augPtr = nullPtr })
 
+evalAugeas :: AugeasConfig -> Augeas a -> IO (AugeasResult a)
+evalAugeas c a = (fst <$>) (runAugeas c a)
+
+execAugeas :: AugeasConfig -> Augeas a -> IO AugeasSession
+execAugeas c a = (snd <$>) (runAugeas c a)
 
 -- propellor integration
 
-instance ToResult (AugeasResult a) where
-  toResult (Left _) = FailedChange
-  toResult (Right (_, modified)) =
-    if null modified
-      then MadeChange
-      else NoChange
-
 augeasAction :: AugeasConfig -> Augeas a -> Propellor Result
 augeasAction cfg as = do
-  augResult <- liftIO $ runAugeas cfg as
-  return . toResult $ augResult
+  (result, session) <- liftIO $ runAugeas cfg as
+  return $ case result of
+    Left e -> FailedChange
+    Right _ ->
+      if not . null . modifiedFiles $ session
+      then MadeChange
+      else NoChange
