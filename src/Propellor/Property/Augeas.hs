@@ -1,11 +1,12 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Propellor.Property.Augeas where
 
 import           Control.Monad (forM, sequence)
 import           Control.Monad.Trans.Class (lift)
-import           Control.Monad.Trans.Either (EitherT, left, runEitherT)
+import           Control.Monad.Trans.Either (EitherT(..), left, runEitherT)
 import           Control.Monad.Trans.State.Strict (evalStateT, get, gets, put, modify, StateT(..), runStateT, state)
 import           Control.Monad.IO.Class (liftIO)
 import           Data.ByteString (ByteString, empty)
@@ -46,7 +47,20 @@ data AugeasSession =
     , modifiedFiles :: [String]
     }
 
-type Augeas a = EitherT AugeasFailure (StateT AugeasSession IO) a
+type AugeasBase e a = EitherT e (StateT AugeasSession IO) a
+type Augeas a = AugeasBase AugeasFailure a
+
+-- IO (State AugeasSession (Either e a)) a
+
+coerceAugeasFailure :: Augeas a -> (AugeasFailure -> e') -> AugeasBase e' a
+coerceAugeasFailure (a :: Augeas a) f =
+  EitherT . StateT $ n
+ where
+  n s = do
+    (e, as) <- runStateT (runEitherT a) s
+    case e of
+      Left m -> return (Left . f $ m, as)
+      Right v -> return (Right v, as)
 
 gets' :: (AugeasSession -> c) -> Augeas c
 gets' = lift . gets
@@ -57,7 +71,7 @@ commandError :: Augeas a
 commandError = do
   aPtr <- gets' augPtr
   e <- fromMaybe [] <$> augMatch "/augeas//errors/*"
-  m <- lift . gets $ modifiedFiles
+  m <- gets' modifiedFiles
   left (AugeasCommandError m e)
 
 augSet :: Path -> Value -> Augeas AugRet
