@@ -37,15 +37,20 @@ type Value = ByteString
 type ModifiedFiles = [String]
 type ErrorMessage = String
 type AugeasErrors = [(String, Maybe ErrorMessage)]
-data AugeasFailure = AugeasCommandError ModifiedFiles AugeasErrors
+data AugeasFailure = AugeasCommandError AugeasCommand ModifiedFiles AugeasErrors
                    | AugeasInitializationFailed
-                   deriving (Show)
+  deriving Show
 
 data AugeasSession =
   AugeasSession
     { augPtr        :: Ptr A.Augeas
     , modifiedFiles :: [String]
     }
+
+data AugeasCommand = Get Path
+                   | Set Path Value
+                   | Save
+  deriving Show
 
 type AugeasBase e a = EitherT e (StateT AugeasSession IO) a
 type Augeas a = AugeasBase AugeasFailure a
@@ -67,12 +72,12 @@ gets' = lift . gets
 put' :: AugeasSession -> Augeas ()
 put' = lift . put
 
-commandError :: Augeas a
-commandError = do
+commandError :: AugeasCommand -> Augeas a
+commandError c = do
   aPtr <- gets' augPtr
-  e <- fromMaybe [] <$> augMatch "/augeas//errors/*"
+  e <- fromMaybe [] <$> augMatch "/errors//*"
   m <- gets' modifiedFiles
-  left (AugeasCommandError m e)
+  left (AugeasCommandError c m e)
 
 augSet :: Path -> Value -> Augeas AugRet
 augSet p v = do
@@ -84,7 +89,9 @@ augGet p = do
   aPtr <- gets' augPtr
   m <- liftIO $ aug_get aPtr p
   case m of
-    Left _  -> commandError
+    -- I'm not sure if I can flatten this results...
+    Left no_match -> return Nothing
+    Left _ -> commandError $ Get p
     Right v -> return v
 
 augMatch :: Path -> Augeas (Maybe [(String, Maybe String)])
@@ -100,7 +107,7 @@ augSave = do
   aPtr <- gets' augPtr
   r <- liftIO $ aug_save aPtr
   if r == A.error
-    then commandError
+    then commandError Save
     else do
       mf <- fromMaybe [] <$> augMatch "/augeas/events/saved"
       let mf' = [v | (_, Just v) <- mf]
@@ -114,16 +121,21 @@ withAugeasPtr c f = do
     Just augeasForeignPtr -> withForeignPtr augeasForeignPtr (\a -> Just <$> f a)
     Nothing -> return Nothing
 
-
 type AugeasResult a = Either AugeasFailure a
 
--- return augeas session with augeas pointer cleared up
-runAugeas :: AugeasConfig -> Augeas a -> IO (AugeasResult a, AugeasSession)
-runAugeas augConf actions = do
+runAugeasBase :: (AugeasFailure -> e) -> AugeasConfig -> AugeasBase e a -> IO (Either e a, AugeasSession)
+runAugeasBase f augConf actions = do
   mr <- withAugeasPtr augConf (\p -> runStateT (runEitherT actions) (AugeasSession p []))
   case mr of
-     Nothing -> return (Left AugeasInitializationFailed, AugeasSession {augPtr = nullPtr, modifiedFiles = []})
-     Just (r, s) -> return (r, s{ augPtr = nullPtr })
+    Nothing -> return
+                 (Left (f AugeasInitializationFailed), AugeasSession
+                                                         { augPtr = nullPtr
+                                                         , modifiedFiles = []
+                                                         })
+    Just (r, s) -> return (r, s { augPtr = nullPtr })
+
+runAugeas :: AugeasConfig -> Augeas a -> IO (AugeasResult a, AugeasSession)
+runAugeas = runAugeasBase id
 
 evalAugeas :: AugeasConfig -> Augeas a -> IO (AugeasResult a)
 evalAugeas c a = (fst <$>) (runAugeas c a)

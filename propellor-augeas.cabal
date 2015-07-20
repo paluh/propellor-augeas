@@ -22,7 +22,7 @@ library
                        , bytestring
                        , directory
                        , either
-                       , errors ==2.0.0
+                       -- , errors ==2.0.0
                        , filepath
                        , optional-args
                        , transformers
