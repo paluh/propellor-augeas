@@ -13,9 +13,11 @@ import           Data.ByteString (ByteString, empty)
 import qualified Data.ByteString.Char8 as Char8
 import           Data.Maybe (catMaybes, fromMaybe)
 import           Foreign (Ptr, nullPtr, withForeignPtr)
+import           Foreign.C.Types (CInt)
 import           Propellor.Types (Propellor(..))
 import           Propellor.Types.Result (Result(..))
-import           System.Augeas (aug_init, aug_match, aug_save, aug_set, AugRet(..), AugFlag,
+import           System.Augeas (aug_init, aug_match, aug_rm, aug_save,
+                                aug_set, AugRet(..), AugFlag,
                                 save_newfile, enable_span, aug_get, AugMatch(..))
 import qualified System.Augeas as A
 
@@ -93,6 +95,11 @@ augGet p = do
     Left no_match -> return Nothing
     Left _ -> commandError $ Get p
     Right v -> return v
+
+augRm :: Path -> Augeas CInt
+augRm p = do
+  aPtr <- gets' augPtr
+  liftIO $ aug_rm aPtr p
 
 augMatch :: Path -> Augeas (Maybe [(String, Maybe String)])
 augMatch p = do

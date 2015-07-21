@@ -6,9 +6,10 @@ import qualified Data.ByteString as ByteString
 import           Data.ByteString.Char8 (pack)
 import           Data.Maybe (mapMaybe, fromMaybe, maybe)
 import           Data.Optional (Optional(..))
-import           Propellor.Property.Augeas (Augeas, AugeasBase, AugeasConfig, augGet, augMatch,
-                                            AugeasFailure, AugeasSession, coerceAugeasFailure,
-                                            runAugeasBase)
+import           System.Augeas (AugRet)
+import           Propellor.Property.Augeas (Augeas, AugeasBase, AugeasConfig, augGet, augMatch, augRm,
+                                            augSave, augSet, AugeasFailure, AugeasSession,
+                                            coerceAugeasFailure, runAugeasBase)
 import           Text.Read (readMaybe)
 
 type Seconds = Int
@@ -130,6 +131,66 @@ getGlobals = do
       , writeQueueLimitLow = writeQueueLimitLow'
       }
 
+setSimpleGlobal :: (a -> String) -> VarName -> Optional a -> Collectd ()
+setSimpleGlobal p name (Specific value) = do
+  let value' = p value
+  -- set /files/etc/apache2/sites-available/foo/VirtualHost/directive "ServerAdmin"
+  -- set /files/etc/apache2/sites-available/foo/VirtualHost/*[self::directive="ServerAdmin"]/arg "admin@example.com"
+  liftAugeas $ augRm
+                 (ByteString.concat
+                    ["/files/etc/collectd.conf/directive[.=\"", pack name, "\"]"])
+  liftAugeas $ augSet "/files/etc/collectd.conf/directive[0]" (pack name)
+  liftAugeas $ augSet
+                 (ByteString.concat
+                    ["/files/etc/collectd.conf/directive[.=\"", pack name, "\"]/arg[1]"])
+                 (pack value')
+  return ()
+setSimpleGlobal p name Default = do
+  liftAugeas $ augRm
+                 (ByteString.concat
+                    ["/files/etc/collectd.conf/directive[.=\"", pack name, "\"]"])
+  return ()
+
+setString :: VarName -> Optional String -> Collectd ()
+setString = setSimpleGlobal id
+
+setInt :: VarName -> Optional Int -> Collectd ()
+setInt = setSimpleGlobal (show :: (Int -> String))
+
+setBool :: VarName -> Optional Bool -> Collectd ()
+setBool = setSimpleGlobal (\b -> if b then "true" else "false")
+
+setGlobals :: Globals -> Collectd ()
+setGlobals Globals
+  { autoLoadPlugin = autoLoadPlugin'
+  , baseDir = baseDir'
+  , pidFile = pidFile'
+  , pluginDir = pluginDir'
+  , hostname = hostname'
+  , interval = interval'
+  , includePath = includePath'
+  , readThreads = readThreads'
+  , timeout = timeout'
+  , typesDB = typesDB'
+  , writeThreads = writeThreads'
+  , writeQueueLimitHigh = writeQueueLimitHigh'
+  , writeQueueLimitLow = writeQueueLimitLow'
+  } = do
+  setBool "AutoLoadPlugin" autoLoadPlugin'
+  setString "BaseDir" baseDir'
+  setString "Hostname" hostname'
+  -- includePath' <- getIncludePath
+  setInt "Interval" interval'
+  setString "PIDFile" pidFile'
+  setString "PluginDir" pluginDir'
+  setInt "ReadThreads" readThreads'
+  setInt "Timeout" timeout'
+  -- typesDB' <- getMultiValueGlobal Just "TypesDB"
+  setInt "WriteQueueLimitHigh" writeQueueLimitHigh'
+  setInt "WriteQueueLimitLow" writeQueueLimitLow'
+  setInt "WriteThreads" writeThreads'
+  return ()
+
 runCollectd :: AugeasConfig -> Collectd a -> IO (Either CollectdError a, AugeasSession)
 runCollectd = runAugeasBase AugeasFailure
 
@@ -139,11 +200,8 @@ evalCollectd c a = (fst <$>) (runCollectd c a)
 execCollectd :: AugeasConfig -> Collectd a -> IO AugeasSession
 execCollectd c a = (snd <$>) (runCollectd c a)
 
--- globals :: (Globals -> Globals) -> Augeas Globals
--- globals f = do
---   baseDir <- getGlobalString "BaseDir"
---   augeasLoadPlugin <- getGlobalString "AutoLoadPlugin"
---   includePath <- getGlobalString "IncludePath"
---   Globals {
---     baseDir = 
-
+updateGlobals :: (Globals -> Globals) -> Collectd ()
+updateGlobals f = do
+  globals <- getGlobals
+  setGlobals . f $ globals
+  liftAugeas augSave
