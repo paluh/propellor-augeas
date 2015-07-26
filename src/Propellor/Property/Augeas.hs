@@ -41,7 +41,7 @@ type ErrorMessage = String
 type AugeasErrors = [(String, Maybe ErrorMessage)]
 data AugeasFailure = AugeasCommandError AugeasCommand ModifiedFiles AugeasErrors
                    | AugeasInitializationFailed
-  deriving Show
+  deriving (Eq, Show)
 
 data AugeasSession =
   AugeasSession
@@ -52,7 +52,7 @@ data AugeasSession =
 data AugeasCommand = Get Path
                    | Set Path Value
                    | Save
-  deriving Show
+  deriving (Eq, Show)
 
 type AugeasBase e a = EitherT e (StateT AugeasSession IO) a
 type Augeas a = AugeasBase AugeasFailure a
