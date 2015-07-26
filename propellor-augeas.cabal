@@ -24,7 +24,20 @@ library
                        , either
                        -- , errors ==2.0.0
                        , filepath
+                       , hspec
                        , optional-args
                        , transformers
                        , propellor
+                       , temporary
   hs-source-dirs:      src
+
+
+test-suite propellor-augeas-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  build-depends:       base
+                     , hspec
+                     , propellor-augeas
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
