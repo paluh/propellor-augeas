@@ -3,16 +3,18 @@
 module Propellor.Property.Collectd where
 
 import           Control.Monad (mapM_, void)
+import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad.Trans.Either (EitherT(..), left, runEitherT)
 import           Control.Monad.Trans.State.Strict (evalStateT, get, gets, put, modify, StateT(..), runStateT, state)
 
 import           Control.Monad.Trans.Reader (ask, ReaderT(..), reader, runReaderT)
 import qualified Data.ByteString as ByteString
-import           Data.ByteString.Char8 (pack)
-import           Data.List (intercalate)
-import           Data.Maybe (mapMaybe, fromMaybe, maybe)
+import           Data.ByteString.Char8 (pack, unpack)
+import           Data.List (intercalate, partition, stripPrefix)
+import           Data.Maybe (catMaybes, isJust, mapMaybe, fromMaybe, maybe)
 import           Data.Optional (Optional(..))
 import           System.Augeas (AugRet)
+import           Text.Regex.Posix ((=~))
 import           Propellor.Property.Augeas (Augeas, AugeasBase, AugeasConfig, augGet, augMatch, augRm,
                                             augSave, augSet, AugeasFailure, AugeasSession,
                                             coerceAugeasFailure, runAugeasBase)
@@ -35,7 +37,7 @@ type ConfigArgument = String
 
 data ConfigStruct = Directive ConfigName [ConfigArgument]
                   | Section ConfigName [ConfigArgument] [ConfigStruct]
-                  deriving (Show)
+                  deriving (Eq, Show)
 
 left' :: CollectdError -> Collectd a
 left' = ReaderT . const . left
@@ -44,43 +46,104 @@ augRm' = liftAugeas . augRm . pack
 augMatch' = liftAugeas . augMatch . pack
 augSet' p = liftAugeas . augSet (pack p) . pack
 
+collectdGet :: String -> Collectd (Maybe String)
+collectdGet path = do
+  p <- fullPath path
+  liftIO $ print p
+  liftAugeas . augGet . pack $ p
+
+-- collectMatch :: String -> Collectd (Maybe [(String, String)])
+collectdMatch path = fullPath path >>= liftAugeas . augMatch . pack
+
 fullPath :: String -> Collectd String
 fullPath s = do
   collecdFile <- ask
-  return . intercalate "/" $ ["/files", collecdFile, dropWhile (== '/') s]
+  return $ "/files" ++ collecdFile ++ "/" ++ dropWhile (== '/') s
 
 appendArg :: ConfigPath -> ConfigArgument -> Collectd ()
 appendArg s v = void (augSet' (s ++ "/arg[last()+1]") v)
 
 type RootPath = Maybe ConfigPath
 
-set :: RootPath -> ConfigStruct -> Collectd ()
-set root (Directive n as) = do
+setStruct :: RootPath -> ConfigStruct -> Collectd ()
+setStruct root (Directive n as) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
   augRm' p
   fullPath (root' ++ "directive[last()+1]") >>= flip augSet' n
   mapM_ (appendArg p) as
-set root (Section n as cs) = do
+setStruct root (Section n as cs) = do
+  let root' = fromMaybe "" root
+  p <- fullPath (root' ++ "/" ++ n)
   augRm' p
   mapM_ (appendArg p) as
-  mapM_ (set (Just $ root' ++ "/" ++ n)) cs
+  mapM_ (setStruct (Just $ root' ++ "/" ++ n)) cs
 
--- getDirective :: RootPath -> Collectd (ConfigStruct)
--- getDirective
+getStruct :: RootPath -> String -> Collectd (Maybe ConfigStruct)
+getStruct root name = do
+  s <- getSection root name
+  d <- getDirective root name
+  if isJust s && isJust d
+    then left' . OverlappingStructsNames $ name
+    else if isJust s
+          then return s
+          else return d
 
-rm :: Maybe ConfigPath -> ConfigStruct -> Collectd ()
-rm root (Directive n _) = do
+getSection :: RootPath -> String -> Collectd (Maybe ConfigStruct)
+getSection root name = do
+  let root' = fromMaybe "" root
+      path = root' ++ name ++ "/"
+  mK2v <- collectdMatch (path ++ "*")
+  case mK2v of
+    Nothing -> return Nothing
+    Just [] -> return Nothing
+    Just k2v -> do
+      -- for given config:
+      --  <Section true>
+      --    Directive 8
+      --    <Subsection 8>
+      --      SubsectionDirective 9
+      --    </Subsection>
+      --  </Section>
+      -- we can expect following structure of mappings:
+      --
+      --  [("/files/etc/collectd.conf/Section/arg",Just "true"),
+      --   ("/files/etc/collectd.conf/Section/directive", Just "Directive"),
+      --   ("/files/etc/collectd.conf/Section/Subsection", Nothing)]
+      --
+      -- it is possible to create section <directive></directive>
+      -- and to distinguish such a case we are using isJust against second
+      -- element of match tuple
+      fp <- fullPath path
+      let (arguments, substructs) = partition (\(k, v) -> (k =~ (".*/arg(\\[[0-9]+\\])?$" :: String))) k2v
+          (subdirectives, subsections) = partition (\(k, v) -> isJust v) substructs
+          subsectionsNames = mapMaybe (stripPrefix fp . fst) subsections
+      substructs <- (++) <$> mapM (getDirective (Just path)) [d |(_, Just d) <- subdirectives]
+                         <*> mapM (getSection (Just path)) subsectionsNames
+      return . Just $ Section name (mapMaybe snd arguments) (catMaybes substructs)
+
+getDirective :: RootPath -> String -> Collectd (Maybe ConfigStruct)
+getDirective root name = do
+  let root' = fromMaybe "" root
+      argsPath = root' ++ "directive[.=\"" ++ name ++ "\"]/*"
+  mK2v <- collectdMatch argsPath
+  case mK2v of
+    Nothing -> return Nothing
+    Just [] -> return Nothing
+    Just k2v -> return . Just . Directive name . mapMaybe snd $ k2v
+
+rmStruct :: Maybe ConfigPath -> ConfigStruct -> Collectd ()
+rmStruct root (Directive n _) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
   void (augRm' p)
-rm root (Section n _ _) = do
+rmStruct root (Section n _ _) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "/" ++ n)
   void (augRm' p)
 
-setGlobal :: ConfigStruct -> Collectd ()
-setGlobal = set Nothing
+setGlobalStruct :: ConfigStruct -> Collectd ()
+setGlobalStruct = setStruct Nothing
 
 type Seconds = Int
 type Iterations = Int
@@ -113,6 +176,7 @@ type VarName = String
 type VarValue = String
 
 data CollectdError = ConfigParseError VarName VarValue
+                   | OverlappingStructsNames VarName
                    | AugeasFailure AugeasFailure
   deriving (Eq, Show)
 

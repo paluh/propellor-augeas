@@ -4,6 +4,7 @@ import           Data.ByteString (ByteString, hPut)
 import qualified Data.ByteString.Char8 as Char8
 import qualified Propellor.Property.Augeas as Augeas
 import qualified Propellor.Property.Collectd as Collectd
+import           Propellor.Property.Collectd (ConfigStruct(..))
 import           Test.Hspec (describe, hspec, it, shouldBe, shouldReturn)
 import           System.Directory (createDirectoryIfMissing)
 import           System.FilePath.Posix (joinPath, splitFileName)
@@ -29,11 +30,11 @@ withPreloadedTempFile dirNameTemplate subpath content action =
 collectdConf = unlines ["AutoLoadPlugin true"
                        , "Interval 1"]
 
-withCollectdConfig :: ByteString -> Collectd.Collectd a -> IO (Either Collectd.CollectdError a)
+withCollectdConfig :: String -> Collectd.Collectd a -> IO (Either Collectd.CollectdError a)
 withCollectdConfig collectdConfiguration action = withPreloadedTempFile
                                                     "propellor-collectd-testroot"
                                                     "etc/collectd.conf"
-                                                    collectdConfiguration
+                                                    (Char8.pack collectdConfiguration)
                                                     (\root ->
                                                        Collectd.evalCollectd
                                                          (Augeas.defaultConfig
@@ -41,11 +42,11 @@ withCollectdConfig collectdConfiguration action = withPreloadedTempFile
                                                          "/etc/collectd.conf"
                                                          action)
 
-withCollectdModificationAndCheck :: ByteString -> Collectd.Collectd a -> Collectd.Collectd a -> IO (Either Collectd.CollectdError a)
+withCollectdModificationAndCheck :: String -> Collectd.Collectd a -> Collectd.Collectd a -> IO (Either Collectd.CollectdError a)
 withCollectdModificationAndCheck collectdConfiguration modification check = withPreloadedTempFile
                                                     "propellor-collectd-testroot"
                                                     "etc/collectd.conf"
-                                                    collectdConfiguration
+                                                    (Char8.pack collectdConfiguration)
                                                     (\root -> do
                                                       (Collectd.evalCollectd (Augeas.defaultConfig { Augeas.augeasRoot = Char8.pack root }) "/etc/collectd.conf" modification)
                                                       Collectd.evalCollectd
@@ -58,14 +59,37 @@ withCollectdModificationAndCheck collectdConfiguration modification check = with
 
 main :: IO ()
 main = hspec $ do
-  describe "Prollelor.Property.Collectd globals" $ do
-    it "updates values correctly" $
-      withCollectdConfig (Char8.pack collectdConf) (do
-          Collectd.setGlobal (Collectd.Directive "test" ["value"])
-
-        )
-        `shouldReturn` (Right ())
-  --     8 `shouldBe` 8
-  -- describe "Prollelor.Property.Collectd globals" $ do
-  --   it "updates values correctly" $ do
-  --     8 `shouldBe` 8
+  describe "Prollelor.Property.Collectd getStruct" $ do
+    it "returns error in case of structs name collision" $
+      withCollectdConfig (unlines ["AutoLoadPlugin true", "<AutoLoadPlugin true>", "</AutoLoadPlugin>"])
+        (Collectd.getStruct Nothing "AutoLoadPlugin") `shouldReturn` (Left
+                                                                        (Collectd.OverlappingStructsNames
+                                                                           "AutoLoadPlugin"))
+    it "fetches simple directive" $
+      withCollectdConfig "AutoLoadPlugin true"
+        (Collectd.getStruct Nothing "AutoLoadPlugin") `shouldReturn`
+          (Right . Just . Directive "AutoLoadPlugin" $ ["true"])
+    it "fetches simple section" $
+      withCollectdConfig "<Plugin df>\n</Plugin>"
+        (Collectd.getSection Nothing "Plugin") `shouldReturn`
+          (Right (Just (Section "Plugin" ["df"] [])))
+    it "fetches section with subdirective" $
+      withCollectdConfig
+        (unlines
+           ["<Plugin df>", "ValuesPercentage true", "</Plugin>"])
+        (Collectd.getSection Nothing "Plugin") `shouldReturn`
+          (Right (Just (Section "Plugin" ["df"] [Directive "ValuesPercentage" ["true"]])))
+    -- I'm not sure if this config is even correct
+    it "fetches section with subsection" $
+      withCollectdConfig
+        (unlines
+           ["<Plugin df>",
+              "<Subsection 8>",
+                "Subdirective value",
+              "</Subsection>",
+              "ValuesPercentage true",
+            "</Plugin>"])
+        (Collectd.getSection Nothing "Plugin") `shouldReturn`
+          (Right (Just (Section "Plugin" ["df"] [ Directive "ValuesPercentage" ["true"]
+                                                , Section "Subsection" ["8"]
+                                                          [Directive "Subdirective" ["value"]]])))
