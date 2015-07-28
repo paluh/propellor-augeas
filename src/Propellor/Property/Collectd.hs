@@ -11,7 +11,7 @@ import           Control.Monad.Trans.Reader (ask, ReaderT(..), reader, runReader
 import qualified Data.ByteString as ByteString
 import           Data.ByteString.Char8 (pack, unpack)
 import           Data.List (intercalate, partition, stripPrefix)
-import           Data.Maybe (catMaybes, isJust, mapMaybe, fromMaybe, maybe)
+import           Data.Maybe (catMaybes, isJust, listToMaybe, mapMaybe, fromMaybe, maybe)
 import           Data.Optional (Optional(..))
 import           System.Augeas (AugRet)
 import           Text.Regex.Posix ((=~))
@@ -29,14 +29,16 @@ import           Text.Read (readMaybe)
 --  of "arg" nodes. Arguments of sections must be the firsts child of the
 --  section node.
 
-type ConfigName = String
+type Label = String
 
-type ConfigPath = String
+type Index = Int
+
+type Path = String
 
 type ConfigArgument = String
 
-data ConfigStruct = Directive ConfigName [ConfigArgument]
-                  | Section ConfigName [ConfigArgument] [ConfigStruct]
+data ConfigStruct = Directive Label [ConfigArgument]
+                  | Section Label [ConfigArgument] [ConfigStruct]
                   deriving (Eq, Show)
 
 left' :: CollectdError -> Collectd a
@@ -46,53 +48,42 @@ augRm' = liftAugeas . augRm . pack
 augMatch' = liftAugeas . augMatch . pack
 augSet' p = liftAugeas . augSet (pack p) . pack
 
-collectdGet :: String -> Collectd (Maybe String)
-collectdGet path = do
-  p <- fullPath path
-  liftIO $ print p
-  liftAugeas . augGet . pack $ p
+collectdGet :: Path -> Collectd (Maybe String)
+collectdGet path = fullPath path >>= liftAugeas . augGet . pack
 
--- collectMatch :: String -> Collectd (Maybe [(String, String)])
+collectdMatch :: Path -> Collectd (Maybe [(Path, Maybe String)])
 collectdMatch path = fullPath path >>= liftAugeas . augMatch . pack
 
-fullPath :: String -> Collectd String
+fullPath :: Path -> Collectd Path
 fullPath s = do
   collecdFile <- ask
   return $ "/files" ++ collecdFile ++ "/" ++ dropWhile (== '/') s
 
-appendArg :: ConfigPath -> ConfigArgument -> Collectd ()
-appendArg s v = void (augSet' (s ++ "/arg[last()+1]") v)
+getStructs :: RootPath -> Label -> Collectd [ConfigStruct]
+getStructs root label = (++) <$> getSections root label
+                             <*> getDirectives root label
 
-type RootPath = Maybe ConfigPath
-
-setStruct :: RootPath -> ConfigStruct -> Collectd ()
-setStruct root (Directive n as) = do
+getSections :: RootPath -> Label -> Collectd [ConfigStruct]
+getSections root label = do
   let root' = fromMaybe "" root
-  p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
-  augRm' p
-  fullPath (root' ++ "directive[last()+1]") >>= flip augSet' n
-  mapM_ (appendArg p) as
-setStruct root (Section n as cs) = do
-  let root' = fromMaybe "" root
-  p <- fullPath (root' ++ "/" ++ n)
-  augRm' p
-  mapM_ (appendArg p) as
-  mapM_ (setStruct (Just $ root' ++ "/" ++ n)) cs
+      sectionsPath = root' ++ label
+  mK2v <- collectdMatch sectionsPath
+  case mK2v of
+    Nothing -> return []
+    Just [] -> return []
+    Just k2v ->
+      catMaybes <$> (mapM (getSection root label) . mapMaybe (extractSectionIndex . fst) $ k2v)
+ where
+  extractSectionIndex :: String -> Maybe Int
+  extractSectionIndex label =
+    case listToMaybe (label =~ (".*/" ++ label ++ "\\[([0-9]+)\\]$") :: [[String]]) of
+      Nothing -> Just 1
+      Just [w, s] -> readMaybe s
 
-getStruct :: RootPath -> String -> Collectd (Maybe ConfigStruct)
-getStruct root name = do
-  s <- getSection root name
-  d <- getDirective root name
-  if isJust s && isJust d
-    then left' . OverlappingStructsNames $ name
-    else if isJust s
-          then return s
-          else return d
-
-getSection :: RootPath -> String -> Collectd (Maybe ConfigStruct)
-getSection root name = do
+getSection :: RootPath -> Label -> Index -> Collectd (Maybe ConfigStruct)
+getSection root label index = do
   let root' = fromMaybe "" root
-      path = root' ++ name ++ "/"
+      path = root' ++ label ++ "[" ++ show index ++ "]/"
   mK2v <- collectdMatch (path ++ "*")
   case mK2v of
     Nothing -> return Nothing
@@ -112,27 +103,64 @@ getSection root name = do
       --   ("/files/etc/collectd.conf/Section/Subsection", Nothing)]
       --
       -- it is possible to create section <directive></directive>
-      -- and to distinguish such a case we are using isJust against second
+      -- and to distinguish such, a case we have to use `isJust` against second
       -- element of match tuple
-      fp <- fullPath path
+      pathWithoutIndex <- fullPath (root' ++ label ++ "/")
       let (arguments, substructs) = partition (\(k, v) -> (k =~ (".*/arg(\\[[0-9]+\\])?$" :: String))) k2v
           (subdirectives, subsections) = partition (\(k, v) -> isJust v) substructs
-          subsectionsNames = mapMaybe (stripPrefix fp . fst) subsections
-      substructs <- (++) <$> mapM (getDirective (Just path)) [d |(_, Just d) <- subdirectives]
-                         <*> mapM (getSection (Just path)) subsectionsNames
-      return . Just $ Section name (mapMaybe snd arguments) (catMaybes substructs)
+          subsectionsNames = mapMaybe (stripPrefix pathWithoutIndex . fst) subsections
+      substructs <- concat <$> ((++) <$> mapM (getDirectives (Just path)) [d |(_, Just d) <- subdirectives]
+                                     <*> mapM (getSections (Just path)) subsectionsNames)
+      return . Just $ Section label (mapMaybe snd arguments) substructs
 
-getDirective :: RootPath -> String -> Collectd (Maybe ConfigStruct)
-getDirective root name = do
+getDirectives :: RootPath -> Label -> Collectd [ConfigStruct]
+getDirectives root label = do
   let root' = fromMaybe "" root
-      argsPath = root' ++ "directive[.=\"" ++ name ++ "\"]/*"
+      directivePath = root' ++ "directive[.=\"" ++ label ++ "\"]"
+  mK2v <- collectdMatch directivePath
+  case mK2v of
+    Nothing -> return []
+    Just [] -> return []
+    Just k2v ->
+      catMaybes <$> (mapM (getDirective root label) . mapMaybe (extractDirectiveIndex . fst) $ k2v)
+ where
+  extractDirectiveIndex :: String -> Maybe Int
+  extractDirectiveIndex label =
+    case listToMaybe (label =~ (".*/directive\\[([0-9]+)\\]$" :: String) :: [[String]]) of
+      Nothing -> Just 1
+      Just [w, s] -> readMaybe s
+
+getDirective :: RootPath -> Label -> Index -> Collectd (Maybe ConfigStruct)
+getDirective root label index = do
+  let root' = fromMaybe "" root
+      argsPath = root' ++ "directive[" ++ show index ++ "]/*"
   mK2v <- collectdMatch argsPath
   case mK2v of
     Nothing -> return Nothing
     Just [] -> return Nothing
-    Just k2v -> return . Just . Directive name . mapMaybe snd $ k2v
+    Just k2v -> return . Just . Directive label . mapMaybe snd $ k2v
 
-rmStruct :: Maybe ConfigPath -> ConfigStruct -> Collectd ()
+appendArg :: Path -> ConfigArgument -> Collectd ()
+appendArg s v = void (augSet' (s ++ "/arg[last()+1]") v)
+
+type RootPath = Maybe Path
+
+setStruct :: RootPath -> ConfigStruct -> Collectd ()
+setStruct root (Directive n as) = do
+  let root' = fromMaybe "" root
+  p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
+  augRm' p
+  fullPath (root' ++ "directive[last()+1]") >>= flip augSet' n
+  mapM_ (appendArg p) as
+setStruct root (Section n as cs) = do
+  let root' = fromMaybe "" root
+  p <- fullPath (root' ++ "/" ++ n)
+  augRm' p
+  mapM_ (appendArg p) as
+  mapM_ (setStruct (Just $ root' ++ "/" ++ n)) cs
+
+
+rmStruct :: Maybe Path -> ConfigStruct -> Collectd ()
 rmStruct root (Directive n _) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
@@ -176,7 +204,6 @@ type VarName = String
 type VarValue = String
 
 data CollectdError = ConfigParseError VarName VarValue
-                   | OverlappingStructsNames VarName
                    | AugeasFailure AugeasFailure
   deriving (Eq, Show)
 

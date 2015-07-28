@@ -59,26 +59,25 @@ withCollectdModificationAndCheck collectdConfiguration modification check = with
 
 main :: IO ()
 main = hspec $ do
-  describe "Prollelor.Property.Collectd getStruct" $ do
-    it "returns error in case of structs name collision" $
+  describe "Prollelor.Property.Collectd getStructs" $ do
+    it "fetches section and directive with the same name" $
       withCollectdConfig (unlines ["AutoLoadPlugin true", "<AutoLoadPlugin true>", "</AutoLoadPlugin>"])
-        (Collectd.getStruct Nothing "AutoLoadPlugin") `shouldReturn` (Left
-                                                                        (Collectd.OverlappingStructsNames
-                                                                           "AutoLoadPlugin"))
+        (Collectd.getStructs Nothing "AutoLoadPlugin") `shouldReturn`
+          (Right [Section "AutoLoadPlugin" ["true"] [], Directive "AutoLoadPlugin" $ ["true"]])
     it "fetches simple directive" $
       withCollectdConfig "AutoLoadPlugin true"
-        (Collectd.getStruct Nothing "AutoLoadPlugin") `shouldReturn`
-          (Right . Just . Directive "AutoLoadPlugin" $ ["true"])
+        (Collectd.getStructs Nothing "AutoLoadPlugin") `shouldReturn`
+          (Right [Directive "AutoLoadPlugin" $ ["true"]])
     it "fetches simple section" $
       withCollectdConfig "<Plugin df>\n</Plugin>"
-        (Collectd.getSection Nothing "Plugin") `shouldReturn`
-          (Right (Just (Section "Plugin" ["df"] [])))
+        (Collectd.getSections Nothing "Plugin") `shouldReturn`
+          (Right [(Section "Plugin" ["df"] [])])
     it "fetches section with subdirective" $
       withCollectdConfig
         (unlines
            ["<Plugin df>", "ValuesPercentage true", "</Plugin>"])
-        (Collectd.getSection Nothing "Plugin") `shouldReturn`
-          (Right (Just (Section "Plugin" ["df"] [Directive "ValuesPercentage" ["true"]])))
+        (Collectd.getSections Nothing "Plugin") `shouldReturn`
+          (Right [(Section "Plugin" ["df"] [Directive "ValuesPercentage" ["true"]])])
     -- I'm not sure if this config is even correct
     it "fetches section with subsection" $
       withCollectdConfig
@@ -89,7 +88,7 @@ main = hspec $ do
               "</Subsection>",
               "ValuesPercentage true",
             "</Plugin>"])
-        (Collectd.getSection Nothing "Plugin") `shouldReturn`
-          (Right (Just (Section "Plugin" ["df"] [ Directive "ValuesPercentage" ["true"]
-                                                , Section "Subsection" ["8"]
-                                                          [Directive "Subdirective" ["value"]]])))
+        (Collectd.getSections Nothing "Plugin") `shouldReturn`
+          (Right [Section "Plugin" ["df"] [ Directive "ValuesPercentage" ["true"]
+                                          , Section "Subsection" ["8"]
+                                              [Directive "Subdirective" ["value"]]]])
