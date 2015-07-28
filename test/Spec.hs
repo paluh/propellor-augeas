@@ -100,3 +100,26 @@ main = hspec $ do
           Right [Section "Plugin" ["df"] [ Directive "ValuesPercentage" ["true"]
                                          , Section "Subsection" ["8"]
                                             [Directive "Subdirective" ["value"]]]]
+
+    it "fetches all matching nodes" $
+      withCollectdConfig
+        (unlines
+          [ "LoadPlugin cpu"
+          , "LoadPlugin load"
+          , "<LoadPlugin df>"
+          ,   "Interval 3600"
+          , "</LoadPlugin>"
+          ])
+        (getNodes Nothing (labelSelector "LoadPlugin")) `shouldReturn`
+          Right [Section "LoadPlugin" ["df"] [Directive "Interval" ["3600"]],Directive "LoadPlugin" ["cpu"],Directive "LoadPlugin" ["load"]]
+    it "filters nodes by arguments" $
+      withCollectdConfig
+        (unlines
+          [ "LoadPlugin cpu"
+          , "LoadPlugin load"
+          , "<LoadPlugin df>"
+          ,   "Interval 3600"
+          , "</LoadPlugin>"
+          ])
+        (getNodes Nothing (Selector "LoadPlugin" ["df"] Nothing)) `shouldReturn`
+          Right [Section "LoadPlugin" ["df"] [Directive "Interval" ["3600"]]]

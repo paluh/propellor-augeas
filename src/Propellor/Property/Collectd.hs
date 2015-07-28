@@ -41,6 +41,8 @@ type Root = Path
 
 type Argument = String
 
+-- minimal selector which is sufficient
+-- in case of collectd configuration
 data Selector = Selector Label [Argument] (Maybe Index)
 
 labelSelector :: Label -> Selector
