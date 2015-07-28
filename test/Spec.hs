@@ -4,7 +4,7 @@ import           Data.ByteString (ByteString, hPut)
 import qualified Data.ByteString.Char8 as Char8
 import qualified Propellor.Property.Augeas as Augeas
 import qualified Propellor.Property.Collectd as Collectd
-import           Propellor.Property.Collectd (ConfigStruct(..))
+import           Propellor.Property.Collectd (Node(..))
 import           Test.Hspec (describe, hspec, it, shouldBe, shouldReturn)
 import           System.Directory (createDirectoryIfMissing)
 import           System.FilePath.Posix (joinPath, splitFileName)
@@ -59,24 +59,33 @@ withCollectdModificationAndCheck collectdConfiguration modification check = with
 
 main :: IO ()
 main = hspec $ do
-  describe "Prollelor.Property.Collectd getStructs" $ do
+  describe "Prollelor.Property.Collectd getSection" $ do
+    it "returns Nothing for non existing node" $
+      withCollectdConfig "AutoLoadPlugin true"
+        (Collectd.getSection Nothing "BaseDir" 1) `shouldReturn`
+          (Left . Collectd.AugeasFailure $ Augeas.NoMatch "/files/etc/collectd.conf/BaseDir[1]")
+  describe "Prollelor.Property.Collectd getNodes" $ do
+    it "returns empty set for non existing node" $
+      withCollectdConfig "AutoLoadPlugin true"
+        (Collectd.getNodes Nothing "BaseDir") `shouldReturn`
+          (Right [])
     it "fetches section and directive with the same name" $
       withCollectdConfig (unlines ["AutoLoadPlugin true", "<AutoLoadPlugin true>", "</AutoLoadPlugin>"])
-        (Collectd.getStructs Nothing "AutoLoadPlugin") `shouldReturn`
+        (Collectd.getNodes Nothing "AutoLoadPlugin") `shouldReturn`
           (Right [Section "AutoLoadPlugin" ["true"] [], Directive "AutoLoadPlugin" $ ["true"]])
     it "fetches simple directive" $
       withCollectdConfig "AutoLoadPlugin true"
-        (Collectd.getStructs Nothing "AutoLoadPlugin") `shouldReturn`
+        (Collectd.getNodes Nothing "AutoLoadPlugin") `shouldReturn`
           (Right [Directive "AutoLoadPlugin" $ ["true"]])
     it "fetches simple section" $
       withCollectdConfig "<Plugin df>\n</Plugin>"
-        (Collectd.getSections Nothing "Plugin") `shouldReturn`
+        (Collectd.getNodes Nothing "Plugin") `shouldReturn`
           (Right [(Section "Plugin" ["df"] [])])
     it "fetches section with subdirective" $
       withCollectdConfig
         (unlines
            ["<Plugin df>", "ValuesPercentage true", "</Plugin>"])
-        (Collectd.getSections Nothing "Plugin") `shouldReturn`
+        (Collectd.getNodes Nothing "Plugin") `shouldReturn`
           (Right [(Section "Plugin" ["df"] [Directive "ValuesPercentage" ["true"]])])
     -- I'm not sure if this config is even correct
     it "fetches section with subsection" $
@@ -92,3 +101,5 @@ main = hspec $ do
           (Right [Section "Plugin" ["df"] [ Directive "ValuesPercentage" ["true"]
                                           , Section "Subsection" ["8"]
                                               [Directive "Subdirective" ["value"]]]])
+  -- describe "Propellor.Property.Collectd setNode" $ do
+    

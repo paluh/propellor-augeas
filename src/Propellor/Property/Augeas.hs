@@ -41,6 +41,7 @@ type ErrorMessage = String
 type AugeasErrors = [(String, Maybe ErrorMessage)]
 data AugeasFailure = AugeasCommandError AugeasCommand ModifiedFiles AugeasErrors
                    | AugeasInitializationFailed
+                   | NoMatch Path
   deriving (Eq, Show)
 
 data AugeasSession =
@@ -92,7 +93,7 @@ augGet p = do
   m <- liftIO $ aug_get aPtr p
   case m of
     -- I'm not sure if I can flatten this results...
-    Left no_match -> return Nothing
+    Left no_match -> left (NoMatch p)
     Left _ -> commandError $ Get p
     Right v -> return v
 

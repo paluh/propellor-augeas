@@ -23,7 +23,7 @@ import           Text.Read (readMaybe)
 
 -- From httpd.aug (collectd.aug uses the same parser):
 --
---  Apache configuration is represented by two main structures, nested sections
+--  Apache configuration is represented by two main nodeures, nested sections
 --  and directives. Sections are used as labels, while directives are kept as a
 --  value. Sections and directives can have positional arguments inside values
 --  of "arg" nodes. Arguments of sections must be the firsts child of the
@@ -35,11 +35,13 @@ type Index = Int
 
 type Path = String
 
+type Root = Path
+
 type ConfigArgument = String
 
-data ConfigStruct = Directive Label [ConfigArgument]
-                  | Section Label [ConfigArgument] [ConfigStruct]
-                  deriving (Eq, Show)
+data Node = Directive Label [ConfigArgument]
+          | Section Label [ConfigArgument] [Node]
+  deriving (Eq, Show)
 
 left' :: CollectdError -> Collectd a
 left' = ReaderT . const . left
@@ -59,11 +61,11 @@ fullPath s = do
   collecdFile <- ask
   return $ "/files" ++ collecdFile ++ "/" ++ dropWhile (== '/') s
 
-getStructs :: RootPath -> Label -> Collectd [ConfigStruct]
-getStructs root label = (++) <$> getSections root label
+getNodes :: Maybe Root -> Label -> Collectd [Node]
+getNodes root label = (++) <$> getSections root label
                              <*> getDirectives root label
 
-getSections :: RootPath -> Label -> Collectd [ConfigStruct]
+getSections :: Maybe Root -> Label -> Collectd [Node]
 getSections root label = do
   let root' = fromMaybe "" root
       sectionsPath = root' ++ label
@@ -72,7 +74,7 @@ getSections root label = do
     Nothing -> return []
     Just [] -> return []
     Just k2v ->
-      catMaybes <$> (mapM (getSection root label) . mapMaybe (extractSectionIndex . fst) $ k2v)
+      mapM (getSection root label) . mapMaybe (extractSectionIndex . fst) $ k2v
  where
   extractSectionIndex :: String -> Maybe Int
   extractSectionIndex label =
@@ -80,40 +82,22 @@ getSections root label = do
       Nothing -> Just 1
       Just [w, s] -> readMaybe s
 
-getSection :: RootPath -> Label -> Index -> Collectd (Maybe ConfigStruct)
+getSection :: Maybe Root -> Label -> Index -> Collectd Node
 getSection root label index = do
   let root' = fromMaybe "" root
-      path = root' ++ label ++ "[" ++ show index ++ "]/"
-  mK2v <- collectdMatch (path ++ "*")
-  case mK2v of
-    Nothing -> return Nothing
-    Just [] -> return Nothing
-    Just k2v -> do
-      -- for given config:
-      --  <Section true>
-      --    Directive 8
-      --    <Subsection 8>
-      --      SubsectionDirective 9
-      --    </Subsection>
-      --  </Section>
-      -- we can expect following structure of mappings:
-      --
-      --  [("/files/etc/collectd.conf/Section/arg",Just "true"),
-      --   ("/files/etc/collectd.conf/Section/directive", Just "Directive"),
-      --   ("/files/etc/collectd.conf/Section/Subsection", Nothing)]
-      --
-      -- it is possible to create section <directive></directive>
-      -- and to distinguish such, a case we have to use `isJust` against second
-      -- element of match tuple
-      pathWithoutIndex <- fullPath (root' ++ label ++ "/")
-      let (arguments, substructs) = partition (\(k, v) -> (k =~ (".*/arg(\\[[0-9]+\\])?$" :: String))) k2v
-          (subdirectives, subsections) = partition (\(k, v) -> isJust v) substructs
-          subsectionsNames = mapMaybe (stripPrefix pathWithoutIndex . fst) subsections
-      substructs <- concat <$> ((++) <$> mapM (getDirectives (Just path)) [d |(_, Just d) <- subdirectives]
-                                     <*> mapM (getSections (Just path)) subsectionsNames)
-      return . Just $ Section label (mapMaybe snd arguments) substructs
+      path = root' ++ label ++ "[" ++ show index ++ "]"
+  -- guard against missing node
+  collectdGet path
+  arguments <- maybe [] (mapMaybe snd) <$> collectdMatch (path ++ "/arg")
+  (subdirectives, subsections) <- maybe ([], []) (partition (\(k, v) -> isJust v))
+                                  <$> collectdMatch (path ++ "/*[label() != \"arg\"]")
+  pathWithoutIndex <- fullPath (root' ++ label ++ "/")
+  let subsectionsNames = mapMaybe (stripPrefix pathWithoutIndex . fst) subsections
+  subnodes <- concat <$> ((++) <$> mapM (getDirectives (Just (path ++ "/"))) [d |(_, Just d) <- subdirectives]
+                               <*> mapM (getSections (Just (path ++ "/"))) subsectionsNames)
+  return $ Section label arguments subnodes
 
-getDirectives :: RootPath -> Label -> Collectd [ConfigStruct]
+getDirectives :: Maybe Root -> Label -> Collectd [Node]
 getDirectives root label = do
   let root' = fromMaybe "" root
       directivePath = root' ++ "directive[.=\"" ++ label ++ "\"]"
@@ -122,7 +106,7 @@ getDirectives root label = do
     Nothing -> return []
     Just [] -> return []
     Just k2v ->
-      catMaybes <$> (mapM (getDirective root label) . mapMaybe (extractDirectiveIndex . fst) $ k2v)
+      mapM (getDirective root label) . mapMaybe (extractDirectiveIndex . fst) $ k2v
  where
   extractDirectiveIndex :: String -> Maybe Int
   extractDirectiveIndex label =
@@ -130,48 +114,44 @@ getDirectives root label = do
       Nothing -> Just 1
       Just [w, s] -> readMaybe s
 
-getDirective :: RootPath -> Label -> Index -> Collectd (Maybe ConfigStruct)
+getDirective :: Maybe Root -> Label -> Index -> Collectd Node
 getDirective root label index = do
   let root' = fromMaybe "" root
-      argsPath = root' ++ "directive[" ++ show index ++ "]/*"
-  mK2v <- collectdMatch argsPath
-  case mK2v of
-    Nothing -> return Nothing
-    Just [] -> return Nothing
-    Just k2v -> return . Just . Directive label . mapMaybe snd $ k2v
+      path = root' ++ "directive[" ++ show index ++ "]"
+      argsPath = path ++ "/*"
+  collectdGet path
+  a2v <- fromMaybe [] <$> collectdMatch argsPath
+  return $ Directive label . mapMaybe snd $ a2v
 
 appendArg :: Path -> ConfigArgument -> Collectd ()
 appendArg s v = void (augSet' (s ++ "/arg[last()+1]") v)
 
-type RootPath = Maybe Path
-
-setStruct :: RootPath -> ConfigStruct -> Collectd ()
-setStruct root (Directive n as) = do
+setNode :: Maybe Root -> Node -> Collectd ()
+setNode root (Directive n as) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
   augRm' p
   fullPath (root' ++ "directive[last()+1]") >>= flip augSet' n
   mapM_ (appendArg p) as
-setStruct root (Section n as cs) = do
+setNode root (Section n as cs) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "/" ++ n)
   augRm' p
   mapM_ (appendArg p) as
-  mapM_ (setStruct (Just $ root' ++ "/" ++ n)) cs
+  mapM_ (setNode (Just $ root' ++ "/" ++ n)) cs
 
-
-rmStruct :: Maybe Path -> ConfigStruct -> Collectd ()
-rmStruct root (Directive n _) = do
+rmNode :: Maybe Path -> Node -> Collectd ()
+rmNode root (Directive n _) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "directive[.=\"" ++ n ++ "\"]")
   void (augRm' p)
-rmStruct root (Section n _ _) = do
+rmNode root (Section n _ _) = do
   let root' = fromMaybe "" root
   p <- fullPath (root' ++ "/" ++ n)
   void (augRm' p)
 
-setGlobalStruct :: ConfigStruct -> Collectd ()
-setGlobalStruct = setStruct Nothing
+setGlobalNode :: Node -> Collectd ()
+setGlobalNode = setNode Nothing
 
 type Seconds = Int
 type Iterations = Int
@@ -348,8 +328,8 @@ setBool = setSimpleGlobal (\b -> if b then "true" else "false")
 --   return ()
 
 
--- globals2ConfigStructs :: Globals -> [ConfigStruct]
--- globals2configStruct Globals
+-- globals2Nodes :: Globals -> [Node]
+-- globals2configNode Globals
 --   { autoLoadPlugin = autoLoadPlugin'
 --   , baseDir = baseDir'
 --   , pidFile = pidFile'
