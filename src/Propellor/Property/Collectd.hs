@@ -43,115 +43,22 @@ type Argument = String
 
 -- minimal selector which is sufficient
 -- in case of collectd configuration
-data Selector = Selector Label [Argument] (Maybe Index)
+data Selector = Selector (Maybe Root) Label [Argument] (Maybe Index)
+  deriving (Eq, Show)
 
 labelSelector :: Label -> Selector
-labelSelector label = Selector label [] Nothing
+labelSelector label = Selector Nothing label [] Nothing
 
-data Node = Directive Label [Argument]
-          | Section Label [Argument] [Node]
+data Node = Node Label [Argument] [Node]
   deriving (Eq, Show)
 
 data CollectdError = ConfigParseError Label Value
+                   | MissingNode Selector
+                   | MultipleNodesMatching Selector
                    | AugeasFailure AugeasFailure
   deriving (Eq, Show)
 
 type Collectd a = ReaderT FilePath (EitherT CollectdError (StateT AugeasSession IO)) a
-
-left' :: CollectdError -> Collectd a
-left' = ReaderT . const . left
-
-liftAugeas :: Augeas a -> Collectd a
-liftAugeas a = ReaderT $ const (coerceAugeasFailure a AugeasFailure)
-
-collectdGet :: Path -> Collectd (Maybe String)
-collectdGet path = fullPath path >>= liftAugeas . augGet . pack
-
-collectdMatch :: Path -> Collectd (Maybe [(Path, Maybe String)])
-collectdMatch path = fullPath path >>= liftAugeas . augMatch . pack
-
-fullPath :: Path -> Collectd Path
-fullPath s = do
-  collecdFile <- ask
-  return $ "/files" ++ collecdFile ++ "/" ++ dropWhile (== '/') s
-
-sectionQuery :: Selector -> String
-sectionQuery (Selector label arguments index) =
-  label ++
-  concatMap (\a -> "[arg=\"" ++ a ++ "\"]") arguments ++
-  maybe "" (\i -> "[" ++ show i ++ "]") index
-directiveQuery :: Selector -> String
-directiveQuery (Selector label arguments index) =
-  "directive[.=\"" ++ label ++ "\"]" ++
-  concatMap (\a -> "[arg=\"" ++ a ++ "\"]") arguments ++
-  maybe "" (\i -> "[" ++ show i ++ "]") index
-
-getNodes :: Maybe Root -> Selector -> Collectd [Node]
-getNodes root selector = (++) <$> getSections root selector
-                              <*> getDirectives root selector
-
-getSections :: Maybe Root -> Selector -> Collectd [Node]
-getSections root selector@(Selector label args _) = do
-  let root' = fromMaybe "" root
-      sectionsPath = root' ++ sectionQuery selector
-  mK2v <- collectdMatch sectionsPath
-  case mK2v of
-    Nothing -> return []
-    Just [] -> return []
-    Just k2v ->
-      mapM (getSection root) . mapMaybe ((Selector label args . Just <$>)
-                             . extractSectionIndex . fst) $ k2v
- where
-  extractSectionIndex :: String -> Maybe Int
-  extractSectionIndex label =
-    case listToMaybe (label =~ (".*/" ++ label ++ "\\[([0-9]+)\\]$") :: [[String]]) of
-      Nothing -> Just 1
-      Just [w, s] -> readMaybe s
-
-getSection :: Maybe Root -> Selector -> Collectd Node
-getSection root selector@(Selector label args index) = do
-  let root' = fromMaybe "" root
-      path = root' ++ sectionQuery selector
-  -- guard against missing node
-  collectdGet path
-  arguments <- maybe [] (mapMaybe snd) <$> collectdMatch (path ++ "/arg")
-  (subdirectives, subsections) <- maybe ([], []) (partition (\(k, v) -> isJust v))
-                                  <$> collectdMatch (path ++ "/*[label() != \"arg\"]")
-  pathWithoutIndex <- fullPath (root' ++ label ++ "/")
-  let subsectionsNames = mapMaybe (stripPrefix pathWithoutIndex . fst) subsections
-  subnodes <- concat <$> ((++) <$> mapM (getDirectives . Just $ path ++ "/")
-                                        [labelSelector d | (_, Just d) <- subdirectives]
-                               <*> mapM ((getSections . Just $ path ++ "/") . labelSelector)
-                                        subsectionsNames)
-  return $ Section label arguments subnodes
-
-getDirectives :: Maybe Root -> Selector -> Collectd [Node]
-getDirectives root selector@(Selector label args index) = do
-  let root' = fromMaybe "" root
-      directivePath = root' ++ directiveQuery selector
-  mK2v <- collectdMatch directivePath
-  case mK2v of
-    Nothing -> return []
-    Just [] -> return []
-    Just k2v ->
-      mapM (getDirective root) . mapMaybe ((Selector label args . Just <$>)
-                               . extractDirectiveIndex . fst) $ k2v
- where
-  extractDirectiveIndex :: String -> Maybe Int
-  extractDirectiveIndex label =
-    case listToMaybe (label =~ (".*/directive\\[([0-9]+)\\]$" :: String) :: [[String]]) of
-      Nothing -> Just 1
-      Just [w, s] -> readMaybe s
-
-getDirective :: Maybe Root -> Selector -> Collectd Node
-getDirective root selector@(Selector label args index) = do
-  let root' = fromMaybe "" root
-      path = root' ++ directiveQuery selector
-      argsPath = path ++ "/*"
-  -- guard against missing node
-  collectdGet path
-  a2v <- fromMaybe [] <$> collectdMatch argsPath
-  return $ Directive label . mapMaybe snd $ a2v
 
 type CollectdFile = FilePath
 
@@ -163,3 +70,143 @@ evalCollectd a f c = (fst <$>) (runCollectd a f c)
 
 execCollectd :: AugeasConfig -> CollectdFile -> Collectd a -> IO AugeasSession
 execCollectd a f c = (snd <$>) (runCollectd a f c)
+
+left' :: CollectdError -> Collectd a
+left' = ReaderT . const . left
+
+liftAugeas :: Augeas a -> Collectd a
+liftAugeas a = ReaderT $ const (coerceAugeasFailure a AugeasFailure)
+
+collectdGet :: Path -> Collectd (Maybe String)
+collectdGet path = fullPath path >>= liftAugeas . augGet . pack
+
+collectdMatch :: Path -> Collectd [(Path, Maybe String)]
+collectdMatch path = fullPath path >>= liftAugeas . augMatch . pack
+
+fullPath :: Path -> Collectd Path
+fullPath s = do
+  collecdFile <- ask
+  return $ "/files" ++ collecdFile ++ "/" ++ dropWhile (== '/') s
+
+sectionQuery :: Selector -> String
+sectionQuery (Selector root label arguments index) =
+  fromMaybe "" root ++
+  label ++
+  concatMap (\a -> "[arg=\"" ++ a ++ "\"]") arguments ++
+  maybe "" (\i -> "[" ++ show i ++ "]") index
+directiveQuery :: Selector -> String
+directiveQuery (Selector root label arguments index) =
+  fromMaybe "" root ++
+  "directive[.=\"" ++ label ++ "\"]" ++
+  concatMap (\a -> "[arg=\"" ++ a ++ "\"]") arguments ++
+  maybe "" (\i -> "[" ++ show i ++ "]") index
+
+getNodes :: Selector -> Collectd [Node]
+getNodes selector = (++) <$> getSections selector
+                         <*> getDirectives selector
+
+getNode :: Selector -> Collectd Node
+getNode selector = do
+  o <- getOptionalNode selector
+  case o of
+    Specific n -> return n
+    Default    -> left' . MissingNode $ selector
+
+getOptionalNode :: Selector -> Collectd (Optional Node)
+getOptionalNode selector = do
+  nodes <- getNodes selector
+  case nodes of
+    [n]       -> return . Specific $ n
+    []        -> return Default
+    otherwise -> left' . MultipleNodesMatching $ selector
+
+getSections :: Selector -> Collectd [Node]
+getSections selector@(Selector root label args _) = do
+  let sectionsPath = sectionQuery selector
+  k2v <- collectdMatch sectionsPath
+  mapM getSection . mapMaybe ((Selector root label args . Just <$>)
+                  . extractSectionIndex . fst) $ k2v
+ where
+  extractSectionIndex :: String -> Maybe Int
+  extractSectionIndex label =
+    case listToMaybe (label =~ (".*/" ++ label ++ "\\[([0-9]+)\\]$") :: [[String]]) of
+      Nothing -> Just 1
+      Just [w, s] -> readMaybe s
+
+getSection :: Selector -> Collectd Node
+getSection selector@(Selector root label args index) = do
+  let path = sectionQuery selector
+  -- guard against missing node
+  collectdGet path
+  arguments <- mapMaybe snd <$> collectdMatch (path ++ "/arg")
+  (subdirectives, subsections) <- partition (\(k, v) -> isJust v)
+                                    <$> collectdMatch (path ++ "/*[label() != \"arg\"]")
+  pathWithoutIndex <- (++ "/") <$> fullPath (sectionQuery (Selector root label args Nothing))
+  let subsectionsNames = mapMaybe (stripPrefix pathWithoutIndex . fst) subsections
+  subnodes <- concat <$> ((++) <$> mapM getDirectives
+                                        [Selector (Just (path ++ "/")) d [] Nothing | (_, Just d) <- subdirectives]
+                               <*> mapM (getSections . (\l -> Selector (Just (path ++ "/")) l [] Nothing))
+                                        subsectionsNames)
+  return $ Node label arguments subnodes
+
+getDirectives :: Selector -> Collectd [Node]
+getDirectives selector@(Selector root label args index) = do
+  let directivePath = directiveQuery selector
+  k2v <- collectdMatch directivePath
+  mapM getDirective . mapMaybe ((Selector root label args . Just <$>)
+                    . extractDirectiveIndex . fst) $ k2v
+ where
+  extractDirectiveIndex :: String -> Maybe Int
+  extractDirectiveIndex label =
+    case listToMaybe (label =~ (".*/directive\\[([0-9]+)\\]$" :: String) :: [[String]]) of
+      Nothing -> Just 1
+      Just [w, s] -> readMaybe s
+
+getDirective :: Selector -> Collectd Node
+getDirective selector@(Selector root label args index) = do
+  let path = directiveQuery selector
+      argsPath = path ++ "/*"
+  -- guard against missing node
+  collectdGet path
+  a2v <- collectdMatch argsPath
+  return $ Node label (mapMaybe snd a2v) []
+
+type Seconds = Int
+type Iterations = Int
+
+type Filter = String
+data Include =
+  Include FilePath
+          Filter
+  deriving (Show)
+
+data Globals =
+       Globals
+         { autoLoadPlugin :: Optional Bool
+         , baseDir :: Optional FilePath
+         , hostname :: Optional String
+         , includePath :: Optional Include
+         , interval :: Optional Seconds
+         , pidFile :: Optional FilePath
+         , pluginDir :: Optional FilePath
+         , readThreads :: Optional Int
+         , typesDB :: Optional [FilePath]
+         , timeout :: Optional Iterations
+         , writeThreads :: Optional Int
+         , writeQueueLimitHigh :: Optional Int
+         , writeQueueLimitLow :: Optional Int
+         }
+  -- PostCacheChain ChainName
+  -- FQDNLookup true|false
+  -- PreCacheChain ChainName
+  deriving Show
+
+-- getByLabel :: (String -> a) -> Label -> Collectd a
+-- getByLabel parse label = do
+--   node <- getNode (labelSelector label)
+--   case node of
+--     Directive _ [v] _ -> return . parse v
+--     Selector _ _ 
+--
+-- getGlobals :: Collectd Globals
+--   autoLoadPlugin' <- getNode "AutoLoadPlugin"
