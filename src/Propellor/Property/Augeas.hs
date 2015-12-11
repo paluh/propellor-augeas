@@ -42,6 +42,7 @@ type AugeasErrors = [(String, Maybe ErrorMessage)]
 data AugeasFailure = AugeasCommandError AugeasCommand ModifiedFiles AugeasErrors
                    | AugeasInitializationFailed
                    | NoMatch Path
+                   | InvalidMatch Path
   deriving (Eq, Show)
 
 data AugeasSession =
@@ -78,7 +79,7 @@ put' = lift . put
 commandError :: AugeasCommand -> Augeas a
 commandError c = do
   aPtr <- gets' augPtr
-  e <- fromMaybe [] <$> augMatch "/errors//*"
+  e <- augMatch "/errors//*"
   m <- gets' modifiedFiles
   left (AugeasCommandError c m e)
 
@@ -94,6 +95,7 @@ augGet p = do
   case m of
     -- I'm not sure if I can flatten this results...
     Left no_match -> left (NoMatch p)
+    Left invalid_match -> left (InvalidMatch p)
     Left _ -> commandError $ Get p
     Right v -> return v
 
@@ -102,13 +104,13 @@ augRm p = do
   aPtr <- gets' augPtr
   liftIO $ aug_rm aPtr p
 
-augMatch :: Path -> Augeas (Maybe [(String, Maybe String)])
+augMatch :: Path -> Augeas [(String, Maybe String)]
 augMatch p = do
   aPtr <- gets' augPtr
   (r, m) <- liftIO $ aug_match aPtr p
   case m of
-    Just paths -> Just <$> sequence [(,) p <$> augGet (Char8.pack p) | p <- paths]
-    Nothing  -> return Nothing
+    Just paths -> sequence [(,) p <$> augGet (Char8.pack p) | p <- paths]
+    Nothing  -> return []
 
 augSave :: Augeas ()
 augSave = do
@@ -117,7 +119,7 @@ augSave = do
   if r == A.error
     then commandError Save
     else do
-      mf <- fromMaybe [] <$> augMatch "/augeas/events/saved"
+      mf <- augMatch "/augeas/events/saved"
       let mf' = [v | (_, Just v) <- mf]
       lift . modify $ (\s -> s{modifiedFiles = mf' ++ modifiedFiles s})
       return ()

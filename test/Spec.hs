@@ -3,8 +3,8 @@
 import           Data.ByteString (ByteString, hPut)
 import qualified Data.ByteString.Char8 as Char8
 import qualified Propellor.Property.Augeas as Augeas
-import           Propellor.Property.Collectd (Collectd, CollectdError(..), evalCollectd, getSections,
-                                              getNodes, getSection, labelSelector, Node(..),
+import           Propellor.Property.Collectd (Collectd, CollectdError(..), evalCollectd, getNodes,
+                                              getNodes, getNode, labelSelector, Node(..),
                                               Selector(..))
 -- import qualified Propellor.Property.Collectd as Collectd
 import           Test.Hspec (describe, hspec, it, shouldReturn)
@@ -58,34 +58,34 @@ withCollectdConfig collectdConfiguration action = withPreloadedTempFile
 
 main :: IO ()
 main = hspec $ do
-  describe "Prollelor.Property.Collectd getSection" $
+  describe "Prollelor.Property.Collectd getNode" $
     it "returns Nothing for non existing node" $
       withCollectdConfig "AutoLoadPlugin true"
-        (getSection Nothing (Selector "BaseDir" [] (Just 1))) `shouldReturn`
+        (getNode (Selector Nothing "BaseDir" [] (Just 1))) `shouldReturn`
           (Left . AugeasFailure $ Augeas.NoMatch "/files/etc/collectd.conf/BaseDir[1]")
   describe "Prollelor.Property.Collectd getNodes" $ do
     it "returns empty set for non existing node" $
       withCollectdConfig "AutoLoadPlugin true"
-        (getNodes Nothing (labelSelector "BaseDir")) `shouldReturn`
+        (getNodes (labelSelector "BaseDir")) `shouldReturn`
           Right []
     it "fetches section and directive with the same name" $
       withCollectdConfig (unlines ["AutoLoadPlugin true", "<AutoLoadPlugin true>", "</AutoLoadPlugin>"])
-        (getNodes Nothing (labelSelector "AutoLoadPlugin")) `shouldReturn`
-          Right [Section "AutoLoadPlugin" ["true"] [], Directive "AutoLoadPlugin" ["true"]]
+        (getNodes (labelSelector "AutoLoadPlugin")) `shouldReturn`
+          Right [Node "AutoLoadPlugin" ["true"] [], Node "AutoLoadPlugin" ["true"] []]
     it "fetches simple directive" $
       withCollectdConfig "AutoLoadPlugin true"
-        (getNodes Nothing (labelSelector "AutoLoadPlugin")) `shouldReturn`
-          Right [Directive "AutoLoadPlugin" ["true"]]
+        (getNodes (labelSelector "AutoLoadPlugin")) `shouldReturn`
+          Right [Node "AutoLoadPlugin" ["true"] []]
     it "fetches simple section" $
       withCollectdConfig "<Plugin df>\n</Plugin>"
-        (getNodes Nothing (labelSelector "Plugin")) `shouldReturn`
-          Right [Section "Plugin" ["df"] []]
+        (getNodes (labelSelector "Plugin")) `shouldReturn`
+          Right [Node "Plugin" ["df"] []]
     it "fetches section with subdirective" $
       withCollectdConfig
         (unlines
            ["<Plugin df>", "ValuesPercentage true", "</Plugin>"])
-        (getNodes Nothing (labelSelector "Plugin")) `shouldReturn`
-          Right [Section "Plugin" ["df"] [Directive "ValuesPercentage" ["true"]]]
+        (getNodes (labelSelector "Plugin")) `shouldReturn`
+          Right [Node "Plugin" ["df"] [Node "ValuesPercentage" ["true"] []]]
     -- I'm not sure if this config is even correct
     it "fetches section with subsection" $
       withCollectdConfig
@@ -96,10 +96,10 @@ main = hspec $ do
               "</Subsection>",
               "ValuesPercentage true",
             "</Plugin>"])
-        (getSections Nothing (labelSelector "Plugin")) `shouldReturn`
-          Right [Section "Plugin" ["df"] [ Directive "ValuesPercentage" ["true"]
-                                         , Section "Subsection" ["8"]
-                                            [Directive "Subdirective" ["value"]]]]
+        (getNodes (labelSelector "Plugin")) `shouldReturn`
+          Right [Node "Plugin" ["df"] [ Node "ValuesPercentage" ["true"] []
+                                         , Node "Subsection" ["8"]
+                                            [Node "Subdirective" ["value"] []]]]
 
     it "fetches all matching nodes" $
       withCollectdConfig
@@ -110,8 +110,10 @@ main = hspec $ do
           ,   "Interval 3600"
           , "</LoadPlugin>"
           ])
-        (getNodes Nothing (labelSelector "LoadPlugin")) `shouldReturn`
-          Right [Section "LoadPlugin" ["df"] [Directive "Interval" ["3600"]],Directive "LoadPlugin" ["cpu"],Directive "LoadPlugin" ["load"]]
+        (getNodes (labelSelector "LoadPlugin")) `shouldReturn`
+          Right [ Node "LoadPlugin" ["df"] [Node "Interval" ["3600"] []]
+                , Node "LoadPlugin" ["cpu"] []
+                , Node "LoadPlugin" ["load"] []]
     it "filters nodes by arguments" $
       withCollectdConfig
         (unlines
@@ -121,5 +123,5 @@ main = hspec $ do
           ,   "Interval 3600"
           , "</LoadPlugin>"
           ])
-        (getNodes Nothing (Selector "LoadPlugin" ["df"] Nothing)) `shouldReturn`
-          Right [Section "LoadPlugin" ["df"] [Directive "Interval" ["3600"]]]
+        (getNodes (Selector Nothing "LoadPlugin" ["df"] Nothing)) `shouldReturn`
+          Right [Node "LoadPlugin" ["df"] [Node "Interval" ["3600"] []]]
